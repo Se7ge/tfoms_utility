@@ -1,120 +1,136 @@
 # -*- coding: utf-8 -*-
-import requests
+from functools import wraps
 import json
 from datetime import datetime
-
 import logging
 
-_codes = {
-    0: u'Ошибка при работе с сервисом',
-    1: u'По переданным данным пациент не найден в БД ТФОМС',
-    2: u'Пациент найден в БД ТФОМС',
-    3: u'Полис найден, несовпадение ФИО, даты рождения'
-}
+import requests
 
 
 class AnswerCodes(object):
-    code = None
-    message = None
+    _codes = {
+        0: u'Ошибка при работе с сервисом',
+        1: u'По переданным данным пациент не найден в БД ТФОМС',
+        2: u'Пациент найден в БД ТФОМС',
+        3: u'Полис найден, несовпадение ФИО, даты рождения'
+    }
 
     def __init__(self, code):
-        if code not in _codes:
+        if code not in self._codes:
             code = 0
         self.code = code
-        self.message = _codes[code]
+        self.message = self._codes[code]
+
+
+class TFOMSClientException(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        self.message = message
+
+    def __str__(self):
+        return u"<%s [%s] \"%s\">" % (self.__class__.__name__, self.code, self.message)
+
+
+def ensure_can_connect(func):
+    """Декоратор для методов TFOMSClient'а, выполняющий (при необходимости) проверки перед запросом"""
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        self.perform_checks()
+        return func(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TFOMSClient(object):
-
-    def __init__(self, host, port, login, password):
+    def __init__(self, host, port, login, password, checkTimeout=0.5):
         self.service_url = 'http://{host}:{port}'.format(host=host, port=port)
+        self.__timeout = checkTimeout
         self.__is_available = False
-        self.__is_logined = False
+        self.__login = login
+        self.__password = password
         self.cookies = None
-        self.__check_service()
-        if self.is_available:
-            self.is_logined = self.__login(login, password)
+        self.__is_logged_in = False
+        self.__is_available = False
+
+    def perform_checks(self):
+        """Вспомогательная функция проверки всякой всячины прежде, чем мы сможем сделать запрос"""
+        if not self.is_available:
+            try:
+                requests.get(self.service_url, timeout=self.__timeout)
+            except requests.exceptions.Timeout, e:
+                self.__is_available = False
+                self.__is_logged_in = False
+                raise TFOMSClientException(0, u"Служба получения данных из ТФОМС временно недоступна")
+            except Exception, e:
+                self.__is_available = False
+                self.__is_logged_in = False
+                raise TFOMSClientException(0, e.message)
+            else:
+                self.__is_available = True
+
+        if not self.is_logged_in:
+            try:
+                r = requests.post(
+                    '{0}/login'.format(self.service_url),
+                    data=json.dumps({
+                        'login': self.__login,
+                        'password': self.__password,
+                    }))
+                if r.status_code == requests.codes.ok:
+                    if r.cookies['session']:
+                        logging.debug(r.cookies['session'])
+                        self.cookies = dict(session=r.cookies['session'])
+                elif r.status_code == requests.codes.unauthorized:
+                    raise TFOMSClientException(requests.codes.unauthorized, u'Неверное имя пользователя или пароль')
+                else:
+                    raise TFOMSClientException(r.status_code, u'Ошибка HTTP')
+            except Exception, e:
+                self.__is_available = False
+                raise TFOMSClientException(0, e.message)
+            else:
+                self.__is_logged_in = True
 
     @property
     def is_available(self):
+        """Свойство доступности сервиса"""
         return self.__is_available
 
-    @is_available.setter
-    def is_available(self, value):
-        self.__is_available = value
-
     @property
-    def is_logined(self):
-        return self.__is_logined
+    def is_logged_in(self):
+        """Свойство пройденности аутентификации у сервиса"""
+        return self.__is_logged_in
 
-    @is_logined.setter
-    def is_logined(self, value):
-        self.__is_logined = value
-
-    def __check_service(self):
-        logging.debug('CHECK TFOMS_SERVICE')
-        try:
-            r = requests.get(self.service_url, timeout=0.5)
-        except requests.exceptions.Timeout, e:
-            logging.debug(e)
-            self.is_available = False
-            logging.debug('CHECK FAILED')
-        else:
-            logging.debug('CHECK SUCCESS')
-            self.is_available = True
-
-    def __login(self, login, password):
-        logging.debug('LOGIN TFOMS_SERVICE (%s, %s)' % (login, password))
-        url = '{}/login'.format(self.service_url)
-        r = requests.post(url, data=json.dumps(dict(login=login, password=password)))
-        if r.status_code == requests.codes.ok:
-            logging.debug('LOGIN SUCCESS')
-            if r.cookies['session']:
-                logging.debug(r.cookies['session'])
-                self.cookies = dict(session=r.cookies['session'])
-            return True
-        elif r.status_code == requests.codes.unauthorized:
-            logging.debug('LOGIN FAILED')
-            return False
-        logging.debug('LOGIN FAILED')
-        return False
-
-    def __check(self, **kwargs):
-        if self.is_logined:
-            url = '{}/check'.format(self.service_url)
-            r = requests.post(url, data=json.dumps(kwargs), cookies=self.cookies)
-            if r.status_code == requests.codes.ok:
-                if r.content == 'true':
-                    return True
-                elif r.content == 'false':
-                    return False
-        return None
-
-    def __search(self, **kwargs):
-        logging.debug('SEARCH PROCESS')
-        if self.is_logined:
-            url = '{}/search'.format(self.service_url)
-            r = requests.post(url, data=json.dumps(kwargs), cookies=self.cookies)
-            logging.debug(self.cookies)
-            if r.status_code == requests.codes.ok:
-                try:
-                    result = r.json()
-                    logging.debug(result)
-                except ValueError, e:
-                    logging.debug(e)
-                    raise e
-                else:
-                    return result
-        logging.debug('NOT LOGINED')
-        return None
-
+    @ensure_can_connect
     def check_policy(self, policy):
-        return self.__check(**policy)
+        """Проверка полиса"""
+        url = '{}/check'.format(self.service_url)
+        r = requests.post(url, data=json.dumps(policy), cookies=self.cookies)
+        if r.status_code == requests.codes.ok:
+            if r.content == 'true':
+                return True
+            elif r.content == 'false':
+                return False
+        else:
+            raise TFOMSClientException(r.status_code, u"Ошибка при выполнении проверки")
 
+    @ensure_can_connect
     def search_policy(self, policy):
-        return self.__search(**policy)
+        """Поиск пациента/полиса"""
+        url = '{}/search'.format(self.service_url)
+        r = requests.post(url, data=json.dumps(policy), cookies=self.cookies)
+        if r.status_code == requests.codes.ok:
+            try:
+                result = r.json()
+            except ValueError, e:
+                raise TFOMSClientException(0, e.message)
+            else:
+                return result
+        else:
+            raise TFOMSClientException(r.status_code, u"Ошибка при выполнении поиска")
 
-    def __get_policy_data(self, data):
+    @staticmethod
+    def __get_policy_data(data):
         policy = dict()
         if 'policy_type' not in data:
             raise AttributeError
@@ -126,7 +142,8 @@ class TFOMSClient(object):
         policy['policy_number'] = data['number']
         return policy
 
-    def __get_patient_data(self, data):
+    @staticmethod
+    def __get_patient_data(data):
         patient = dict()
         patient['lastname'] = data['lastName'].upper()
         patient['firstName'] = data['firstName'].upper()
@@ -145,7 +162,7 @@ class TFOMSClient(object):
         all_data = patient
         all_data.update(policy)
         try:
-            result = self.__search(**all_data)
+            result = self.search_policy(all_data)
         except ValueError, e:
             logging.error(e)
             return dict(status=AnswerCodes(0), data=None)
@@ -156,7 +173,7 @@ class TFOMSClient(object):
         else:
             # Не нашли пациента в ТФОМС, проверяем только полис
             try:
-                result = self.__search(**policy)
+                result = self.search_policy(policy)
             except ValueError, e:
                 logging.error(e)
                 return dict(status=AnswerCodes(0), data=None)
