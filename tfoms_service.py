@@ -9,7 +9,7 @@ _codes = {
     0: u'Ошибка при работе с сервисом',
     1: u'По переданным данным пациент не найден в БД ТФОМС',
     2: u'Пациент найден в БД ТФОМС',
-    3: u'Полис найден, несовпадение ФИО, даты рождения'
+    3: u'Полис найден, несовпадение даты рождения'
 }
 
 
@@ -128,9 +128,6 @@ class TFOMSClient(object):
 
     def __get_patient_data(self, data):
         patient = dict()
-        patient['lastname'] = data['lastName'].upper()
-        patient['firstName'] = data['firstName'].upper()
-        patient['midname'] = data['patrName'].upper()
         if 'birthDate' in data:
             patient['birthdate'] = datetime.strftime(data['birthDate'], '%d.%m.%Y')
         return patient
